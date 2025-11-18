@@ -1,0 +1,29 @@
+{
+  "$schema":"https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion":"1.0.0.0",
+  "parameters":{
+    "botId":{"type":"string"},
+    "displayName":{"type":"string"},
+    "endpoint":{"type":"string"},
+    "appId":{"type":"string"},
+    "tenantId":{"type":"string"},
+    "sku":{"type":"string","defaultValue":"F0","allowedValues":["F0","S1"]},
+    "location":{"type":"string","defaultValue":"global"}
+  },
+  "resources":[
+    {"type":"Microsoft.BotService/botServices","apiVersion":"2022-09-15",
+     "name":"[parameters('botId')]","location":"[parameters('location')]",
+     "sku":{"name":"[parameters('sku')]"},"kind":"sdk",
+     "properties":{
+       "displayName":"[parameters('displayName')]",
+       "endpoint":"[parameters('endpoint')]",
+       "msaAppId":"[parameters('appId')]",
+       "msaAppType":"SingleTenant",
+       "msaAppTenantId":"[parameters('tenantId')]",
+       "iconUrl":"https://docs.botframework.com/static/devportal/client/images/bot-framework-default.png",
+       "luisAppIds":[],
+       "isCmekEnabled":false
+     }
+    }
+  ]
+}

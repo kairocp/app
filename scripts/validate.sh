@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # validate.sh — hybrid validation with robust calling route checks
 set -euo pipefail
-if [[ -f .env ]]; then
+# Always source .env next to this script (fallback to caller cwd)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f "${SCRIPT_DIR}/.env" ]]; then
+  source "${SCRIPT_DIR}/.env"
+elif [[ -f .env ]]; then
   source .env
-elif [[ -f scripts/.env ]]; then
-  source scripts/.env
 fi
 
 REQ_VARS=(SUB_NAME RG LOC PLAN APP MEDIA_VM BOT_NAME APP_ID APP_SECRET TENANT_ID AOAI_NAME AOAI_DEPLOY_NAME SPEECH_NAME PG_NAME PG_ADMIN PG_ADMIN_PW PG_DB)
