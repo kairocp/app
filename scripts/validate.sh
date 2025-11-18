@@ -7,16 +7,20 @@ elif [[ -f scripts/.env ]]; then
   source scripts/.env
 fi
 
-REQ_VARS=(SUB_NAME RG LOC PLAN APP MEDIA_APP BOT_NAME APP_ID APP_SECRET TENANT_ID AOAI_NAME AOAI_DEPLOY_NAME SPEECH_NAME PG_NAME PG_ADMIN PG_ADMIN_PW PG_DB)
+REQ_VARS=(SUB_NAME RG LOC PLAN APP MEDIA_VM BOT_NAME APP_ID APP_SECRET TENANT_ID AOAI_NAME AOAI_DEPLOY_NAME SPEECH_NAME PG_NAME PG_ADMIN PG_ADMIN_PW PG_DB)
 for V in "${REQ_VARS[@]}"; do [[ -n "${!V:-}" ]] || { echo "❌ Missing $V in .env"; exit 1; }; done
 
 az account set --subscription "$SUB_NAME"
 SUB_ID="$(az account show --query id -o tsv)"
 
 APP_HOST="$(az webapp show -g "$RG" -n "$APP" --query defaultHostName -o tsv)"
-MEDIA_HOST="$(az webapp show -g "$RG" -n "$MEDIA_APP" --query defaultHostName -o tsv)"
+MEDIA_FQDN="${MEDIA_FQDN:-$(az network public-ip show -g "$RG" -n "${MEDIA_VM}-pip" --query dnsSettings.fqdn -o tsv)}"
+if [[ -z "$MEDIA_FQDN" ]]; then
+  echo "❌ Could not resolve media VM public FQDN from ${MEDIA_VM}-pip"
+  exit 1
+fi
 MSG_ENDPOINT_RAW="https://${APP_HOST}/api/messages"
-CALL_ENDPOINT_RAW="https://${MEDIA_HOST}/api/calls"
+CALL_ENDPOINT_RAW="https://${MEDIA_FQDN}/callback"
 
 normalize_url_py () {
 python3 - "$@" <<'PY'
@@ -35,7 +39,7 @@ CHAN_URI="https://management.azure.com/subscriptions/${SUB_ID}/resourceGroups/${
 
 echo "== Hosts =="
 echo "APP:   https://${APP_HOST}/"
-echo "MEDIA: https://${MEDIA_HOST}/"
+echo "MEDIA: https://${MEDIA_FQDN}/"
 echo "MSG:   $MSG_ENDPOINT"
 echo "CALL:  $CALL_ENDPOINT"
 echo

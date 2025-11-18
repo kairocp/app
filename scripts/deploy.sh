@@ -4,7 +4,7 @@ set -euo pipefail
 [[ -f .env ]] && source .env
 
 # ===== required vars =====
-req_vars=(SUB_NAME RG LOC PLAN APP APP_NAME BOT_NAME BOT_DISPLAY APP_ID APP_SECRET TENANT_ID AOAI_NAME AOAI_SKU AOAI_DEPLOY_NAME AOAI_MODEL AOAI_VERSION SPEECH_NAME PG_NAME PG_ADMIN PG_ADMIN_PW PG_TIER PG_SKU PG_VER PG_STORAGE PG_DB INTERNAL_TOKEN ORG_DEFAULT MEDIA_VM MEDIA_ADMIN MEDIA_ADMIN_PW MEDIA_PORT_START MEDIA_PORT_END MEDIA_SIG_PORT MEDIA_VM_SIZE)
+req_vars=(SUB_NAME RG LOC PLAN APP APP_NAME BOT_NAME BOT_DISPLAY APP_ID APP_SECRET TENANT_ID AOAI_NAME AOAI_SKU AOAI_DEPLOY_NAME AOAI_MODEL AOAI_VERSION SPEECH_NAME PG_NAME PG_ADMIN PG_ADMIN_PW PG_TIER PG_SKU PG_VER PG_STORAGE PG_DB INTERNAL_TOKEN ORG_DEFAULT MEDIA_VM MEDIA_ADMIN MEDIA_ADMIN_PW MEDIA_PORT_START MEDIA_PORT_END MEDIA_SIG_PORT MEDIA_VM_SIZE REPO_URL REPO_BRANCH MEDIA_BOT_PROJ)
 for v in "${req_vars[@]}"; do [[ -n "${!v:-}" ]] || { echo "❌ Missing $v in .env"; exit 1; }; done
 
 echo "== Login & context =="
@@ -100,7 +100,105 @@ az network nic create -g "$RG" -n "${MEDIA_VM}-nic" --vnet-name "${MEDIA_VM}-vne
 az vm create -g "$RG" -n "$MEDIA_VM" --image Win2022Datacenter --size "$MEDIA_VM_SIZE" --admin-username "$MEDIA_ADMIN" --admin-password "$MEDIA_ADMIN_PW" --nics "${MEDIA_VM}-nic" >/dev/null || true
 
 MEDIA_FQDN="$(az network public-ip show -g "$RG" -n "${MEDIA_VM}-pip" --query dnsSettings.fqdn -o tsv)"
-CALL_ENDPOINT="https://${MEDIA_FQDN}/api/calls"
+# The sample listens on /callback (CallingCallbackController). Keep Graph calling route aligned.
+CALL_ENDPOINT="https://${MEDIA_FQDN}/callback"
+
+echo "== Build & run media bot on Windows VM =="
+cat > install-media-bot.ps1 <<EOF
+param(
+  [string]\$RepoUrl,
+  [string]\$Branch,
+  [string]\$ProjectPath,
+  [string]\$InstallDir = "C:\\media-bot"
+)
+
+Write-Host "Installing media bot from repo \$RepoUrl (branch \$Branch) into \$InstallDir"
+
+New-Item -ItemType Directory -Force -Path \$InstallDir | Out-Null
+
+# Install .NET 8 Hosting Bundle
+\$hostingExe = "\$InstallDir\\hosting.exe"
+if (-not (Test-Path \$hostingExe)) {
+  Write-Host "Downloading .NET Hosting Bundle..."
+  Invoke-WebRequest -Uri "https://download.visualstudio.microsoft.com/download/pr/0c21d19f-3b3b-4c24-9fbe-6b4e0c25e553/e5dc9e22b88f5cc2ff8baf5120a0610d/dotnet-hosting-8.0.8-win.exe" -OutFile \$hostingExe
+  Write-Host "Installing .NET Hosting Bundle..."
+  Start-Process \$hostingExe -ArgumentList "/quiet" -Wait
+}
+
+# Install Git via Chocolatey if not present
+if (-not (Get-Command git.exe -ErrorAction SilentlyContinue)) {
+  Write-Host "Installing Chocolatey + Git..."
+  Set-ExecutionPolicy Bypass -Scope Process -Force
+  [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
+  iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
+  choco install git -y
+}
+
+# Clone or update repo
+\$repoDir = "\$InstallDir\\src"
+if (-not (Test-Path \$repoDir)) {
+  git clone \$RepoUrl \$repoDir
+} else {
+  cd \$repoDir
+  git fetch origin
+}
+cd \$repoDir
+git checkout \$Branch
+git pull origin \$Branch
+
+# Publish the media bot
+\$publishDir = "\$InstallDir\\publish"
+Write-Host "Publishing media bot project \$ProjectPath to \$publishDir"
+dotnet publish \$ProjectPath -c Release -o \$publishDir
+
+# Env vars for the bot
+[System.Environment]::SetEnvironmentVariable("REASON_URL", "https://${APP_HOST}", "Machine")
+[System.Environment]::SetEnvironmentVariable("INTERNAL_TOKEN", "${INTERNAL_TOKEN}", "Machine")
+[System.Environment]::SetEnvironmentVariable("ORG_DEFAULT", "${ORG_DEFAULT}", "Machine")
+[System.Environment]::SetEnvironmentVariable("AzureAd__Instance", "https://login.microsoftonline.com/", "Machine")
+[System.Environment]::SetEnvironmentVariable("AzureAd__TenantId", "${TENANT_ID}", "Machine")
+[System.Environment]::SetEnvironmentVariable("AzureAd__ClientId", "${APP_ID}", "Machine")
+[System.Environment]::SetEnvironmentVariable("AzureAd__ClientSecret", "${APP_SECRET}", "Machine")
+[System.Environment]::SetEnvironmentVariable("SPEECH_KEY", "${SPEECH_KEY}", "Machine")
+[System.Environment]::SetEnvironmentVariable("SPEECH_REGION", "${SPEECH_REGION}", "Machine")
+[System.Environment]::SetEnvironmentVariable("MicrosoftAppId", "${APP_ID}", "Machine")
+[System.Environment]::SetEnvironmentVariable("MicrosoftAppPassword", "${APP_SECRET}", "Machine")
+[System.Environment]::SetEnvironmentVariable("TENANT_ID", "${TENANT_ID}", "Machine")
+[System.Environment]::SetEnvironmentVariable("Bot__AppId", "${APP_ID}", "Machine")
+[System.Environment]::SetEnvironmentVariable("Bot__AppSecret", "${APP_SECRET}", "Machine")
+[System.Environment]::SetEnvironmentVariable("Bot__BotBaseUrl", "https://${MEDIA_FQDN}", "Machine")
+[System.Environment]::SetEnvironmentVariable("Bot__PlaceCallEndpointUrl", "https://graph.microsoft.com/v1.0", "Machine")
+[System.Environment]::SetEnvironmentVariable("Bot__GraphApiResourceUrl", "https://graph.microsoft.com", "Machine")
+[System.Environment]::SetEnvironmentVariable("Bot__MicrosoftLoginUrl", "https://login.microsoftonline.com/", "Machine")
+[System.Environment]::SetEnvironmentVariable("Bot__RecordingDownloadDirectory", "temp", "Machine")
+[System.Environment]::SetEnvironmentVariable("Bot__CatalogAppId", "${APP_ID}", "Machine")
+[System.Environment]::SetEnvironmentVariable("CognitiveServices__Enabled", "true", "Machine")
+[System.Environment]::SetEnvironmentVariable("CognitiveServices__SpeechKey", "${SPEECH_KEY}", "Machine")
+[System.Environment]::SetEnvironmentVariable("CognitiveServices__SpeechRegion", "${SPEECH_REGION}", "Machine")
+[System.Environment]::SetEnvironmentVariable("CognitiveServices__SpeechRecognitionLanguage", "en-US", "Machine")
+[System.Environment]::SetEnvironmentVariable("Users__UserIdWithAssignedOnlineMeetingPolicy", "", "Machine")
+[System.Environment]::SetEnvironmentVariable("MEDIA_PORT_START", "${MEDIA_PORT_START}", "Machine")
+[System.Environment]::SetEnvironmentVariable("MEDIA_PORT_END", "${MEDIA_PORT_END}", "Machine")
+[System.Environment]::SetEnvironmentVariable("MEDIA_SIG_PORT", "${MEDIA_SIG_PORT}", "Machine")
+[System.Environment]::SetEnvironmentVariable("ACS_CONNECTION_STRING", "${ACS_CONNECTION_STRING}", "Machine")
+[System.Environment]::SetEnvironmentVariable("ACS_CALLBACK_URL", "https://${MEDIA_FQDN}/api/calling", "Machine")
+
+# Start bot as scheduled task
+\$exeName = [System.IO.Path]::GetFileNameWithoutExtension(\$ProjectPath)
+\$exe = Join-Path \$publishDir (\$exeName + ".exe")
+Write-Host "Registering MediaBot scheduled task..."
+\$action  = New-ScheduledTaskAction -Execute \$exe -WorkingDirectory \$publishDir
+\$trigger = New-ScheduledTaskTrigger -AtStartup
+Register-ScheduledTask -TaskName "MediaBot" -Action \$action -Trigger \$trigger -RunLevel Highest -Force | Out-Null
+
+Write-Host "Starting MediaBot process..."
+Start-Process \$exe -WorkingDirectory \$publishDir
+EOF
+
+az vm run-command invoke -g "$RG" -n "$MEDIA_VM" \
+  --command-id RunPowerShellScript \
+  --scripts @"install-media-bot.ps1" \
+  --parameters "RepoUrl=$REPO_URL" "Branch=$REPO_BRANCH" "ProjectPath=$MEDIA_BOT_PROJ"
 
 echo "== Enable Teams + set calling route (both fields) =="
 BOT_URI="https://management.azure.com/subscriptions/${SUB_ID}/resourceGroups/${RG}/providers/Microsoft.BotService/botServices/${BOT_NAME}?api-version=2022-09-15"
