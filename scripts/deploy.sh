@@ -10,7 +10,7 @@ elif [[ -f .env ]]; then
 fi
 
 # ===== required vars =====
-req_vars=(SUB_NAME RG LOC PLAN APP APP_NAME BOT_NAME BOT_DISPLAY APP_ID APP_SECRET TENANT_ID AOAI_NAME AOAI_SKU AOAI_DEPLOY_NAME AOAI_MODEL AOAI_VERSION SPEECH_NAME PG_NAME PG_ADMIN PG_ADMIN_PW PG_TIER PG_SKU PG_VER PG_STORAGE PG_DB INTERNAL_TOKEN ORG_DEFAULT MEDIA_VM MEDIA_ADMIN MEDIA_ADMIN_PW MEDIA_PORT_START MEDIA_PORT_END MEDIA_SIG_PORT MEDIA_VM_SIZE REPO_URL REPO_BRANCH MEDIA_BOT_PROJ)
+req_vars=(SUB_NAME RG LOC PLAN APP APP_NAME BOT_NAME BOT_DISPLAY APP_ID APP_SECRET TENANT_ID AOAI_NAME AOAI_SKU AOAI_DEPLOY_NAME AOAI_MODEL AOAI_VERSION SPEECH_NAME PG_NAME PG_ADMIN PG_ADMIN_PW PG_TIER PG_SKU PG_VER PG_STORAGE PG_DB INTERNAL_TOKEN ORG_DEFAULT MEDIA_VM MEDIA_ADMIN MEDIA_ADMIN_PW MEDIA_PORT_START MEDIA_PORT_END MEDIA_SIG_PORT MEDIA_VM_SIZE REPO_URL REPO_BRANCH MEDIA_BOT_PROJ SSL_EMAIL SSL_PFX_PASS)
 for v in "${req_vars[@]}"; do [[ -n "${!v:-}" ]] || { echo "❌ Missing $v in .env"; exit 1; }; done
 
 echo "== Login & context =="
@@ -96,19 +96,44 @@ MSG_ENDPOINT="https://${APP_HOST}/api/messages"
 
 echo "== Media VM (Windows, Graph media bot hosting) =="
 az network vnet create -g "$RG" -l "$MEDIA_LOC" -n "${MEDIA_VM}-vnet" --subnet-name default >/dev/null || true
-az network nsg create -g "$RG" -l "$MEDIA_LOC" -n "${MEDIA_VM}-nsg" >/dev/null || true
+az network nsg create  -g "$RG" -l "$MEDIA_LOC" -n "${MEDIA_VM}-nsg" >/dev/null || true
 
-# Allow HTTPS, signaling, and media UDP range
-az network nsg rule create -g "$RG" --nsg-name "${MEDIA_VM}-nsg" -n allow-https --priority 100 --access Allow --direction Inbound --protocol Tcp --source-address-prefixes Internet --source-port-ranges '*' --destination-port-ranges 443 >/dev/null || true
-az network nsg rule create -g "$RG" --nsg-name "${MEDIA_VM}-nsg" -n allow-sig --priority 110 --access Allow --direction Inbound --protocol Tcp --source-address-prefixes Internet --source-port-ranges '*' --destination-port-ranges "$MEDIA_SIG_PORT" >/dev/null || true
-az network nsg rule create -g "$RG" --nsg-name "${MEDIA_VM}-nsg" -n allow-media --priority 120 --access Allow --direction Inbound --protocol Udp --source-address-prefixes Internet --source-port-ranges '*' --destination-port-ranges "${MEDIA_PORT_START}-${MEDIA_PORT_END}" >/dev/null || true
+# Allow HTTPS, signaling, and media UDP range (all priorities >= 100)
+az network nsg rule create -g "$RG" --nsg-name "${MEDIA_VM}-nsg" -n allow-http \
+  --priority 100 --access Allow --direction Inbound --protocol Tcp \
+  --source-address-prefixes Internet --source-port-ranges '*' --destination-port-ranges 80 \
+  >/dev/null || true
+
+az network nsg rule create -g "$RG" --nsg-name "${MEDIA_VM}-nsg" -n allow-https \
+  --priority 110 --access Allow --direction Inbound --protocol Tcp \
+  --source-address-prefixes Internet --source-port-ranges '*' --destination-port-ranges 443 \
+  >/dev/null || true
+
+az network nsg rule create -g "$RG" --nsg-name "${MEDIA_VM}-nsg" -n allow-sig \
+  --priority 120 --access Allow --direction Inbound --protocol Tcp \
+  --source-address-prefixes Internet --source-port-ranges '*' --destination-port-ranges "$MEDIA_SIG_PORT" \
+  >/dev/null || true
+
+az network nsg rule create -g "$RG" --nsg-name "${MEDIA_VM}-nsg" -n allow-media \
+  --priority 130 --access Allow --direction Inbound --protocol Udp \
+  --source-address-prefixes Internet --source-port-ranges '*' --destination-port-ranges "${MEDIA_PORT_START}-${MEDIA_PORT_END}" \
+  >/dev/null || true
 
 if [[ -n "$MEDIA_ZONE" ]]; then
-  az network public-ip create -g "$RG" -l "$MEDIA_LOC" -n "${MEDIA_VM}-pip" --sku Standard --allocation-method Static --dns-name "${MEDIA_VM}" --zone "$MEDIA_ZONE" >/dev/null || true
+  az network public-ip create -g "$RG" -l "$MEDIA_LOC" -n "${MEDIA_VM}-pip" \
+    --sku Standard --allocation-method Static --dns-name "${MEDIA_VM}" --zone "$MEDIA_ZONE" \
+    >/dev/null || true
 else
-  az network public-ip create -g "$RG" -l "$MEDIA_LOC" -n "${MEDIA_VM}-pip" --sku Standard --allocation-method Static --dns-name "${MEDIA_VM}" >/dev/null || true
+  az network public-ip create -g "$RG" -l "$MEDIA_LOC" -n "${MEDIA_VM}-pip" \
+    --sku Standard --allocation-method Static --dns-name "${MEDIA_VM}" \
+    >/dev/null || true
 fi
-az network nic create -g "$RG" -l "$MEDIA_LOC" -n "${MEDIA_VM}-nic" --vnet-name "${MEDIA_VM}-vnet" --subnet default --network-security-group "${MEDIA_VM}-nsg" --public-ip-address "${MEDIA_VM}-pip" >/dev/null || true
+
+az network nic create -g "$RG" -l "$MEDIA_LOC" -n "${MEDIA_VM}-nic" \
+  --vnet-name "${MEDIA_VM}-vnet" --subnet default \
+  --network-security-group "${MEDIA_VM}-nsg" \
+  --public-ip-address "${MEDIA_VM}-pip" \
+  >/dev/null || true
 
 if ! az vm show -g "$RG" -n "$MEDIA_VM" >/dev/null 2>&1; then
   echo "Creating media VM (will try fallbacks if SKU unavailable)..."
@@ -154,113 +179,32 @@ SPEECH_KEY="$(az cognitiveservices account keys list -n "$SPEECH_NAME" -g "$RG" 
 SPEECH_REGION="${SPEECH_LOC:-$LOC}"
 
 echo "== Build & run media bot on Windows VM =="
-cat > install-media-bot.ps1 <<EOF
-param(
-  [string]\$RepoUrl,
-  [string]\$Branch,
-  [string]\$ProjectPath,
-  [string]\$InstallDir = "C:\\media-bot"
-)
-
-Write-Host "Installing media bot from repo \$RepoUrl (branch \$Branch) into \$InstallDir"
-
-New-Item -ItemType Directory -Force -Path \$InstallDir | Out-Null
-\$env:Path += ";C:\\Program Files\\Git\\bin;C:\\Program Files\\dotnet"
-[System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12
-
-# Install .NET 8 SDK via dotnet-install (portable, avoids download flakiness)
-\$dotnetDir = "\$InstallDir\\dotnet"
-if (-not (Test-Path "\$dotnetDir\\dotnet.exe")) {
-  Write-Host "Installing .NET 8 SDK via dotnet-install..."
-  \$dotnetInstaller = "\$InstallDir\\dotnet-install.ps1"
-  Invoke-WebRequest -UseBasicParsing -Headers @{"User-Agent"="Mozilla/5.0"} -Uri "https://dot.net/v1/dotnet-install.ps1" -OutFile \$dotnetInstaller
-  if (-not (Test-Path \$dotnetInstaller)) { throw "dotnet-install.ps1 download failed" }
-  & powershell -ExecutionPolicy Bypass -File \$dotnetInstaller -Version 8.0.403 -InstallDir \$dotnetDir
-}
-\$env:DOTNET_ROOT = \$dotnetDir
-\$env:Path = "\$dotnetDir;" + \$env:Path
-
-# Install Git via Chocolatey if not present (refresh PATH for this session)
-if (-not (Get-Command git.exe -ErrorAction SilentlyContinue)) {
-  Write-Host "Installing Chocolatey + Git..."
-  Set-ExecutionPolicy Bypass -Scope Process -Force
-  [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
-  iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
-  choco install git -y
-  \$env:Path += ";C:\\Program Files\\Git\\bin"
-}
-\$git = "C:\\Program Files\\Git\\bin\\git.exe"
-if (-not (Test-Path \$git)) { throw "git not found at \$git" }
-
-# Ensure .NET SDK available for publish
-\$dotnet = "\$dotnetDir\\dotnet.exe"
-if (-not (Test-Path \$dotnet)) { throw ".NET SDK not found at \$dotnet" }
-
-# Clone or update repo
-\$repoDir = "\$InstallDir\\src"
-if (-not (Test-Path \$repoDir)) {
-  & \$git clone \$RepoUrl \$repoDir
-} else {
-  & \$git -C \$repoDir fetch origin
-}
-& \$git -C \$repoDir checkout \$Branch
-& \$git -C \$repoDir pull origin \$Branch
-\$projectPathResolved = Join-Path \$repoDir \$ProjectPath
-if (-not (Test-Path \$projectPathResolved)) { throw "Project file not found at \$projectPathResolved" }
-
-# Publish the media bot
-\$publishDir = "\$InstallDir\\publish"
-Write-Host "Publishing media bot project \$ProjectPath to \$publishDir"
-& \$dotnet publish \$projectPathResolved -c Release -o \$publishDir
-
-# Env vars for the bot
-[System.Environment]::SetEnvironmentVariable("REASON_URL", "https://${APP_HOST}", "Machine")
-[System.Environment]::SetEnvironmentVariable("INTERNAL_TOKEN", "${INTERNAL_TOKEN}", "Machine")
-[System.Environment]::SetEnvironmentVariable("ORG_DEFAULT", "${ORG_DEFAULT}", "Machine")
-[System.Environment]::SetEnvironmentVariable("AzureAd__Instance", "https://login.microsoftonline.com/", "Machine")
-[System.Environment]::SetEnvironmentVariable("AzureAd__TenantId", "${TENANT_ID}", "Machine")
-[System.Environment]::SetEnvironmentVariable("AzureAd__ClientId", "${APP_ID}", "Machine")
-[System.Environment]::SetEnvironmentVariable("AzureAd__ClientSecret", "${APP_SECRET}", "Machine")
-[System.Environment]::SetEnvironmentVariable("SPEECH_KEY", "${SPEECH_KEY}", "Machine")
-[System.Environment]::SetEnvironmentVariable("SPEECH_REGION", "${SPEECH_REGION}", "Machine")
-[System.Environment]::SetEnvironmentVariable("MicrosoftAppId", "${APP_ID}", "Machine")
-[System.Environment]::SetEnvironmentVariable("MicrosoftAppPassword", "${APP_SECRET}", "Machine")
-[System.Environment]::SetEnvironmentVariable("TENANT_ID", "${TENANT_ID}", "Machine")
-[System.Environment]::SetEnvironmentVariable("Bot__AppId", "${APP_ID}", "Machine")
-[System.Environment]::SetEnvironmentVariable("Bot__AppSecret", "${APP_SECRET}", "Machine")
-[System.Environment]::SetEnvironmentVariable("Bot__BotBaseUrl", "https://${MEDIA_FQDN}", "Machine")
-[System.Environment]::SetEnvironmentVariable("Bot__PlaceCallEndpointUrl", "https://graph.microsoft.com/v1.0", "Machine")
-[System.Environment]::SetEnvironmentVariable("Bot__GraphApiResourceUrl", "https://graph.microsoft.com", "Machine")
-[System.Environment]::SetEnvironmentVariable("Bot__MicrosoftLoginUrl", "https://login.microsoftonline.com/", "Machine")
-[System.Environment]::SetEnvironmentVariable("Bot__RecordingDownloadDirectory", "temp", "Machine")
-[System.Environment]::SetEnvironmentVariable("Bot__CatalogAppId", "${APP_ID}", "Machine")
-[System.Environment]::SetEnvironmentVariable("CognitiveServices__Enabled", "true", "Machine")
-[System.Environment]::SetEnvironmentVariable("CognitiveServices__SpeechKey", "${SPEECH_KEY}", "Machine")
-[System.Environment]::SetEnvironmentVariable("CognitiveServices__SpeechRegion", "${SPEECH_REGION}", "Machine")
-[System.Environment]::SetEnvironmentVariable("CognitiveServices__SpeechRecognitionLanguage", "en-US", "Machine")
-[System.Environment]::SetEnvironmentVariable("Users__UserIdWithAssignedOnlineMeetingPolicy", "", "Machine")
-[System.Environment]::SetEnvironmentVariable("MEDIA_PORT_START", "${MEDIA_PORT_START}", "Machine")
-[System.Environment]::SetEnvironmentVariable("MEDIA_PORT_END", "${MEDIA_PORT_END}", "Machine")
-[System.Environment]::SetEnvironmentVariable("MEDIA_SIG_PORT", "${MEDIA_SIG_PORT}", "Machine")
-[System.Environment]::SetEnvironmentVariable("ACS_CONNECTION_STRING", "${ACS_CONNECTION_STRING}", "Machine")
-[System.Environment]::SetEnvironmentVariable("ACS_CALLBACK_URL", "https://${MEDIA_FQDN}/api/calling", "Machine")
-
-# Start bot as scheduled task
-\$exeName = [System.IO.Path]::GetFileNameWithoutExtension(\$ProjectPath)
-\$exe = Join-Path \$publishDir (\$exeName + ".exe")
-Write-Host "Registering MediaBot scheduled task..."
-\$action  = New-ScheduledTaskAction -Execute \$exe -WorkingDirectory \$publishDir
-\$trigger = New-ScheduledTaskTrigger -AtStartup
-Register-ScheduledTask -TaskName "MediaBot" -Action \$action -Trigger \$trigger -RunLevel Highest -User "SYSTEM" -Force | Out-Null
-
-Write-Host "Starting MediaBot process..."
-Start-Process \$exe -WorkingDirectory \$publishDir
-EOF
-
 az vm run-command invoke -g "$RG" -n "$MEDIA_VM" \
   --command-id RunPowerShellScript \
-  --scripts @"install-media-bot.ps1" \
-  --parameters "RepoUrl=$REPO_URL" "Branch=$REPO_BRANCH" "ProjectPath=$MEDIA_BOT_PROJ"
+  --scripts @"${SCRIPT_DIR}/install-media-bot.ps1" \
+  --parameters \
+    "RepoUrl=$REPO_URL" \
+    "Branch=$REPO_BRANCH" \
+    "ProjectPath=$MEDIA_BOT_PROJ" \
+    "AppHost=$APP_HOST" \
+    "InternalToken=$INTERNAL_TOKEN" \
+    "OrgDefault=$ORG_DEFAULT" \
+    "TenantId=$TENANT_ID" \
+    "AppId=$APP_ID" \
+    "AppSecret=$APP_SECRET" \
+    "SpeechKey=$SPEECH_KEY" \
+    "SpeechRegion=$SPEECH_REGION" \
+    "MediaFqdn=$MEDIA_FQDN" \
+    "MediaPortStart=$MEDIA_PORT_START" \
+    "MediaPortEnd=$MEDIA_PORT_END" \
+    "MediaSigPort=$MEDIA_SIG_PORT" \
+    "AcsConnectionString=$ACS_CONNECTION_STRING"
+
+echo "== SSL cert (Let's Encrypt) on media VM =="
+az vm run-command invoke -g "$RG" -n "$MEDIA_VM" \
+  --command-id RunPowerShellScript \
+  --scripts @"${SCRIPT_DIR}/ssl.ps1" \
+  --parameters "Domain=$MEDIA_FQDN" "Email=$SSL_EMAIL" "PfxPass=$SSL_PFX_PASS" "AppId=$APP_ID" "TaskName=MediaBot"
 
 echo "== Enable Teams + set calling route (both fields) =="
 BOT_URI="https://management.azure.com/subscriptions/${SUB_ID}/resourceGroups/${RG}/providers/Microsoft.BotService/botServices/${BOT_NAME}?api-version=2022-09-15"
